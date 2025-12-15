@@ -116,7 +116,7 @@ get_uuid() {
 }
 
 get_ip() {
-    [[ $ip || $is_no_auto_tls || $is_gen ]] && return
+    [[ $ip || $is_no_auto_tls || $is_gen || $is_dont_get_ip ]] && return
     export "$(_wget -4 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
     [[ ! $ip ]] && export "$(_wget -6 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
     [[ ! $ip ]] && {
@@ -159,7 +159,7 @@ show_list() {
 is_test() {
     case $1 in
     number)
-        echo $2 | egrep '^[1-9][0-9]?+$'
+        echo $2 | grep -E '^[1-9][0-9]?+$'
         ;;
     port)
         if [[ $(is_test number $2) ]]; then
@@ -170,13 +170,13 @@ is_test() {
         [[ $(is_port_used $2) && ! $is_cant_test_port ]] && echo ok
         ;;
     domain)
-        echo $2 | egrep -i '^\w(\w|\-|\.)?+\.\w+$'
+        echo $2 | grep -E -i '^\w(\w|\-|\.)?+\.\w+$'
         ;;
     path)
-        echo $2 | egrep -i '^\/\w(\w|\-|\/)?+\w$'
+        echo $2 | grep -E -i '^\/\w(\w|\-|\/)?+\w$'
         ;;
     uuid)
-        echo $2 | egrep -i '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        echo $2 | grep -E -i '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
         ;;
     esac
 
@@ -369,7 +369,7 @@ create() {
         else
             [[ ! $is_ntp_on ]] && is_ntp=
         fi
-        is_outbounds='outbounds:[{tag:"direct",type:"direct"},{tag:"block",type:"block"}]'
+        is_outbounds='outbounds:[{tag:"direct",type:"direct"}]'
         is_server_config_json=$(jq "{$is_log,$is_dns,$is_ntp$is_outbounds}" <<<{})
         cat <<<$is_server_config_json >$is_config_json
         manage restart &
@@ -467,7 +467,7 @@ change() {
     1)
         # new port
         is_new_port=$3
-        [[ $host && ! $is_caddy ]] && err "($is_config_file) 不支持更改端口, 因为没啥意义."
+        [[ $host && ! $is_caddy || $is_no_auto_tls ]] && err "($is_config_file) 不支持更改端口, 因为没啥意义."
         if [[ $is_new_port && ! $is_auto ]]; then
             [[ ! $(is_test port $is_new_port) ]] && err "请输入正确的端口, 可选(1-65535)"
             [[ $is_new_port != 443 && $(is_test port_used $is_new_port) ]] && err "无法使用 ($is_new_port) 端口"
@@ -635,6 +635,8 @@ change() {
 
 # delete config.
 del() {
+    # dont get ip
+    is_dont_get_ip=1
     [[ $is_conf_dir_empty ]] && return # not found any json file.
     # get a config file
     [[ ! $is_config_file ]] && get info $1
@@ -653,7 +655,7 @@ del() {
                 [[ ! $old_host ]] && return # no host exist or not set new host;
                 is_del_host=$old_host
             }
-            [[ $is_del_host && $host != $old_host ]] && {
+            [[ $is_del_host && $host != $old_host && -f $is_caddy_conf/$is_del_host.conf ]] && {
                 rm -rf $is_caddy_conf/$is_del_host.conf $is_caddy_conf/$is_del_host.conf.add
                 [[ ! $is_new_json ]] && manage restart caddy &
             }
@@ -663,6 +665,7 @@ del() {
         warn "当前配置目录为空! 因为你刚刚删除了最后一个配置文件."
         is_conf_dir_empty=1
     fi
+    unset is_dont_get_ip
     [[ $is_dont_auto_exit ]] && unset is_config_file
 }
 
@@ -778,7 +781,7 @@ add() {
             ;;
         *)
             for v in ${protocol_list[@]}; do
-                [[ $(egrep -i "^$is_lower$" <<<$v) ]] && is_new_protocol=$v && break
+                [[ $(grep -E -i "^$is_lower$" <<<$v) ]] && is_new_protocol=$v && break
             done
 
             [[ ! $is_new_protocol ]] && err "无法识别 ($1), 请使用: $is_core add [protocol] [args... | auto]"
@@ -846,7 +849,7 @@ add() {
         case $is_old_net in
         h2 | ws | httpupgrade)
             old_host=$host
-            [[ ! $is_use_tls ]] && host=
+            [[ ! $is_use_tls ]] && unset host is_no_auto_tls
             ;;
         reality)
             net_type=
@@ -902,7 +905,7 @@ add() {
             is_tmp_use_name=加密方式
             is_tmp_list=${ss_method_list[@]}
             for v in ${is_tmp_list[@]}; do
-                [[ $(egrep -i "^${is_use_method}$" <<<$v) ]] && is_tmp_use_type=$v && break
+                [[ $(grep -E -i "^${is_use_method}$" <<<$v) ]] && is_tmp_use_type=$v && break
             done
             [[ ! ${is_tmp_use_type} ]] && {
                 warn "(${is_use_method}) 不是一个可用的${is_tmp_use_name}."
@@ -1019,6 +1022,7 @@ get() {
         [[ ! $is_addr ]] && {
             get_ip
             is_addr=$ip
+            [[ $(grep ":" <<<$ip) ]] && is_addr="[$ip]"
         }
         ;;
     new)
@@ -1029,8 +1033,8 @@ get() {
     file)
         is_file_str=$2
         [[ ! $is_file_str ]] && is_file_str='.json$'
-        # is_all_json=("$(ls $is_conf_dir | egrep $is_file_str)")
-        readarray -t is_all_json <<<"$(ls $is_conf_dir | egrep -i "$is_file_str" | sed '/dynamic-port-.*-link/d' | head -233)" # limit max 233 lines for show.
+        # is_all_json=("$(ls $is_conf_dir | grep -E $is_file_str)")
+        readarray -t is_all_json <<<"$(ls $is_conf_dir | grep -E -i "$is_file_str" | sed '/dynamic-port-.*-link/d' | head -233)" # limit max 233 lines for show.
         [[ ! $is_all_json ]] && err "无法找到相关的配置文件: $2"
         [[ ${#is_all_json[@]} -eq 1 ]] && is_config_file=$is_all_json && is_auto_get_config=1
         [[ ! $is_config_file ]] && {
@@ -1067,7 +1071,10 @@ get() {
             is_config_name=$is_config_file
 
             if [[ $is_caddy && $host && -f $is_caddy_conf/$host.conf ]]; then
-                is_tmp_https_port=$(egrep -o "$host:[1-9][0-9]?+" $is_caddy_conf/$host.conf | sed s/.*://)
+                is_tmp_https_port=$(grep -E -o "$host:[1-9][0-9]?+" $is_caddy_conf/$host.conf | sed s/.*://)
+            fi
+            if [[ $host && ! -f $is_caddy_conf/$host.conf ]]; then
+                is_no_auto_tls=1
             fi
             [[ $is_tmp_https_port ]] && is_https_port=$is_tmp_https_port
             [[ $is_client && $host ]] && port=$is_https_port
@@ -1091,6 +1098,8 @@ get() {
         tuic*)
             net=tuic
             is_protocol=$net
+            [[ ! $password ]] && password=$uuid
+            is_users="users:[{uuid:\"$uuid\",password:\"$password\"}]"
             json_str="$is_users,congestion_control:\"bbr\",$is_tls_json"
             ;;
         trojan*)
@@ -1190,7 +1199,11 @@ get() {
         fi
         ;;
     ssss | ss2022)
-        $is_core_bin generate rand 32 --base64
+        if [[ $(grep 128 <<<$ss_method) ]]; then
+            $is_core_bin generate rand 16 --base64
+        else
+            $is_core_bin generate rand 32 --base64
+        fi
         ;;
     ping)
         # is_ip_type="-4"
@@ -1199,11 +1212,6 @@ get() {
         is_dns_type="a"
         [[ $(grep ":" <<<$ip) ]] && is_dns_type="aaaa"
         is_host_dns=$(_wget -qO- --header="accept: application/dns-json" "https://one.one.one.one/dns-query?name=$host&type=$is_dns_type")
-        ;;
-    log | logerr)
-        msg "\n 提醒: 按 $(_green Ctrl + C) 退出\n"
-        [[ $1 == 'log' ]] && tail -f $is_log_dir/access.log
-        [[ $1 == 'logerr' ]] && tail -f $is_log_dir/error.log
         ;;
     install-caddy)
         _green "\n安装 Caddy 实现自动配置 TLS.\n"
@@ -1326,10 +1334,10 @@ info() {
         ;;
     tuic)
         is_insecure=1
-        is_can_change=(0 1 5)
-        is_info_show=(0 1 2 3 8 9 20 21)
-        is_url="$is_protocol://$uuid:@$is_addr:$port?alpn=h3&allow_insecure=1&congestion_control=bbr#233boy-$net-$is_addr"
-        is_info_str=($is_protocol $is_addr $port $uuid tls h3 true bbr)
+        is_can_change=(0 1 4 5)
+        is_info_show=(0 1 2 3 10 8 9 20 21)
+        is_url="$is_protocol://$uuid:$password@$is_addr:$port?alpn=h3&allow_insecure=1&congestion_control=bbr#233boy-$net-$is_addr"
+        is_info_str=($is_protocol $is_addr $port $uuid $password tls h3 true bbr)
         ;;
     reality)
         is_color=41
@@ -1343,7 +1351,7 @@ info() {
             is_info_show=(${is_info_show[@]/15/})
         }
         is_info_str=($is_protocol $is_addr $port $uuid $is_flow $is_net_type reality $is_servername chrome $is_public_key)
-        is_url="$is_protocol://$uuid@$ip:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#233boy-$net-$is_addr"
+        is_url="$is_protocol://$uuid@$is_addr:$port?encryption=none&security=reality&flow=$is_flow&type=$is_net_type&sni=$is_servername&pbk=$is_public_key&fp=chrome#233boy-$net-$is_addr"
         ;;
     direct)
         is_can_change=(0 1 7 8)
@@ -1528,7 +1536,8 @@ is_main_menu() {
             _try_enable_bbr
             ;;
         2)
-            get log
+            load log.sh
+            log_set
             ;;
         3)
             get test-run
@@ -1646,7 +1655,8 @@ main() {
         load import.sh
         ;;
     log)
-        get $@
+        load log.sh
+        log_set $2
         ;;
     url | qr)
         url_qr $@
